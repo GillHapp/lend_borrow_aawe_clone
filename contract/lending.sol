@@ -9,7 +9,6 @@ import {aToken} from "./aToken.sol";
 contract Lending is Ownable {
     uint256 public rewardRate = 1;
     aToken public atoken;
-    uint256 public scale = 2500;
     AggregatorV3Interface internal priceFeed;
 
     struct UserBalance {
@@ -21,8 +20,9 @@ contract Lending is Ownable {
 
     mapping(address => UserBalance) public balances;
 
-    constructor(address _atoken) Ownable(msg.sender) {
+    constructor(address _atoken,address _priceFeed) Ownable(msg.sender) {
         atoken = aToken(_atoken);
+         priceFeed = AggregatorV3Interface(_priceFeed);
     }
 
     function depositETH() external payable {
@@ -44,18 +44,26 @@ contract Lending is Ownable {
         atoken.mint(msg.sender, gweiAmount * 1e18);
     }
 
-    function calculateReward(address userAddr) public view returns (uint256) {
-        UserBalance memory user = balances[userAddr];
-        require(user.ethDeposited > 0, "No deposit");
+ function calculateReward(address userAddr) public view returns (uint256) {
+    UserBalance memory user = balances[userAddr];
+    require(user.ethDeposited > 0, "No deposit");
 
-        uint256 timeElapsed = block.timestamp - user.depositTimestamp;
-        uint256 ethInGwei = user.ethDeposited / 1 gwei;
-        uint256 fiveMinIntervals = timeElapsed / (1 seconds);
+    uint256 timeElapsed = block.timestamp - user.depositTimestamp;
 
-        uint256 reward = (ethInGwei * fiveMinIntervals * rewardRate) / scale;
-
-        return reward + user.unclaimedRewards;
+    // Require full 30-hour interval to apply reward
+    if (timeElapsed < 30 hours) {
+        return user.unclaimedRewards; // no new reward yet
     }
+
+    uint256 intervals = timeElapsed / (30 hours);
+    uint256 ethInGwei = user.ethDeposited / 1 gwei;
+    uint256 currentScale = getLatestEthUsdPrice();
+
+    uint256 reward = (ethInGwei * intervals * rewardRate) / currentScale;
+
+    return reward + user.unclaimedRewards;
+}
+
 
     function getContractEthBalance() external view returns (uint256) {
         return address(this).balance;
@@ -67,7 +75,9 @@ contract Lending is Ownable {
 
     function getAPR() public view returns (uint256) {
         uint256 intervalsPerYear = (365 * 24) / 30;
-        uint256 apr = (rewardRate * intervalsPerYear * 10000) / scale;
+        uint256 currentScale = getLatestEthUsdPrice();
+
+        uint256 apr = (rewardRate * intervalsPerYear * 10000) / currentScale;
         return apr;
     }
 
@@ -94,7 +104,7 @@ contract Lending is Ownable {
     user.unclaimedRewards += pendingReward;
 
     uint256 totalGwei = user.aTokenMinted + user.unclaimedRewards;
-    uint256 totalETHToReturn = (totalGwei * 1 gwei) + user.ethDeposited;
+    uint256 totalETHToReturn = (totalGwei * 1 gwei);
 
     require(address(this).balance >= totalETHToReturn, "Insufficient contract balance");
 
@@ -110,6 +120,9 @@ atoken.burn(msg.sender, user.aTokenMinted * 1e18);
     // emit Redeemed(msg.sender, totalETHToReturn, totalGwei);
 }
 
-
+ function getLatestEthUsdPrice() public view returns (uint256) {
+    (, int256 price,,,) = priceFeed.latestRoundData();
+    return uint256(price)/10**8; // 8 decimals
+}
 
 }
