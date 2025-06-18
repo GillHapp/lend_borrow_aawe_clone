@@ -134,16 +134,25 @@ import {OwnerIsCreator} from "@chainlink/contracts/src/v0.8/shared/access/OwnerI
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
 import {IERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 contract TokenTransferor is OwnerIsCreator {
     using SafeERC20 for IERC20;
-
+     AggregatorV3Interface internal dataFeedETHToUSD;// this is for eth usd
+     AggregatorV3Interface internal dataFeedLinkToUSD;// this is for Link usd
     error NotEnoughBalance(uint256 currentBalance, uint256 calculatedFees); // Used to make sure contract has enough balance to cover the fees.
     error NothingToWithdraw(); // Used when trying to withdraw Ether but there's nothing to withdraw.
     error FailedToWithdrawEth(address owner, address target, uint256 value); // Used when the withdrawal of Ether fails.
     error DestinationChainNotAllowlisted(uint64 destinationChainSelector); // Used when the destination chain has not been allowlisted by the contract owner.
     error InvalidReceiverAddress(); // Used when the receiver address is 0.
     // Event emitted when the tokens are transferred to an account on another chain.
+
+    struct UserPosition {
+    uint256 collateralETH;     // Amount of ETH user deposited
+    uint256 borrowedLINK;      // Amount of LINK borrowed  
+}
+    mapping(address => UserPosition) public userPositions;
+
     event TokensTransferred(
         bytes32 indexed messageId, // The unique ID of the message.
         uint64 indexed destinationChainSelector, // The chain selector of the destination chain.
@@ -161,9 +170,15 @@ contract TokenTransferor is OwnerIsCreator {
 
     IERC20 private s_linkToken;
 
-    constructor(address _router, address _link) {
+    constructor(address _router, address _link, AggregatorV3Interface _priceFeedETHToUSD, AggregatorV3Interface _priceFeedLinkToUSD) {
         s_router = IRouterClient(_router);
         s_linkToken = IERC20(_link);
+         dataFeedETHToUSD = AggregatorV3Interface(
+            _priceFeedETHToUSD
+        );
+         dataFeedLinkToUSD = AggregatorV3Interface(
+            _priceFeedLinkToUSD
+        );
     }
 
     modifier onlyAllowlistedChain(uint64 _destinationChainSelector) {
@@ -184,32 +199,35 @@ contract TokenTransferor is OwnerIsCreator {
         allowlistedChains[_destinationChainSelector] = allowed;
     }
 
-    function transferTokensPayLINK(
-        uint64 _destinationChainSelector,
-        address _receiver,
-        address _token,
-        uint256 _amount
+    function borrowLinkAndCollETHAndPayLINK(
+        uint64 _destinationChainSelector
     )
         external
-        onlyOwner
         onlyAllowlistedChain(_destinationChainSelector)
-        validateReceiver(_receiver)
+        validateReceiver(msg.sender)
+        payable 
         returns (bytes32 messageId)
     {
+        require(msg.value> 1 gwei,"Must send ETH as collateral");
+
+       uint256 loanAmount = _calculateLoanAmount(msg.value);
+
+       userPositions[msg.sender].collateralETH += msg.value;
+       userPositions[msg.sender].borrowedLINK += loanAmount;
 
         Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-            _receiver,
-            _token,
-            _amount,
+            msg.sender,
+             address(s_linkToken),
+            loanAmount,
             address(s_linkToken)
         );
-
         // Get the fee required to send the message
         uint256 fees = s_router.getFee(
             _destinationChainSelector,
             evm2AnyMessage
         );
-
+        bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
+        require(success, "LINK fee transfer failed");
         if (fees > s_linkToken.balanceOf(address(this)))
             revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
 
@@ -217,7 +235,7 @@ contract TokenTransferor is OwnerIsCreator {
         s_linkToken.approve(address(s_router), fees);
 
         // approve the Router to spend tokens on contract's behalf. It will spend the amount of the given token
-        IERC20(_token).approve(address(s_router), _amount);
+        IERC20(s_linkToken).approve(address(s_router), loanAmount);
 
         // Send the message through the router and store the returned message ID
         messageId = s_router.ccipSend(
@@ -229,63 +247,10 @@ contract TokenTransferor is OwnerIsCreator {
         emit TokensTransferred(
             messageId,
             _destinationChainSelector,
-            _receiver,
-            _token,
-            _amount,
+            msg.sender,
             address(s_linkToken),
-            fees
-        );
-
-        // Return the message ID
-        return messageId;
-    }
-
-    function transferTokensPayNative(
-        uint64 _destinationChainSelector,
-        address _receiver,
-        address _token,
-        uint256 _amount
-    )
-        external
-        onlyOwner
-        onlyAllowlistedChain(_destinationChainSelector)
-        validateReceiver(_receiver)
-        returns (bytes32 messageId)
-    {
-
-        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-            _receiver,
-            _token,
-            _amount,
-            address(0)
-        );
-
-        // Get the fee required to send the message
-        uint256 fees = s_router.getFee(
-            _destinationChainSelector,
-            evm2AnyMessage
-        );
-
-        if (fees > address(this).balance)
-            revert NotEnoughBalance(address(this).balance, fees);
-
-        // approve the Router to spend tokens on contract's behalf. It will spend the amount of the given token
-        IERC20(_token).approve(address(s_router), _amount);
-
-        // Send the message through the router and store the returned message ID
-        messageId = s_router.ccipSend{value: fees}(
-            _destinationChainSelector,
-            evm2AnyMessage
-        );
-
-        // Emit an event with message details
-        emit TokensTransferred(
-            messageId,
-            _destinationChainSelector,
-            _receiver,
-            _token,
-            _amount,
-            address(0),
+            loanAmount,
+            address(s_linkToken),
             fees
         );
 
@@ -354,6 +319,45 @@ contract TokenTransferor is OwnerIsCreator {
 
         IERC20(_token).safeTransfer(_beneficiary, amount);
     }
+
+     function getChainlinkDataFeedForETHUSD() public view returns (int) {
+        (
+            /* uint80 roundId */,
+            int256 answer,
+            /*uint256 startedAt*/,
+            /*uint256 updatedAt*/,
+            /*uint80 answeredInRound*/
+        ) = dataFeedETHToUSD.latestRoundData();
+        return (answer/10**8);
+    }
+     function getChainlinkDataFeedForLinkUSD() public view returns (int) {
+        (
+            /* uint80 roundId */,
+            int256 answer,
+            /*uint256 startedAt*/,
+            /*uint256 updatedAt*/,
+            /*uint80 answeredInRound*/
+        ) = dataFeedLinkToUSD.latestRoundData();
+        return (answer/10**8);
+    }
+
+    function getCollateralValueInUSD(uint256 ethAmount) public view returns (uint256) {
+    require(ethAmount>0 ,"Invalid amount");
+    int usdInEth = getChainlinkDataFeedForETHUSD();
+    require(usdInEth > 0, "Invalid price feed");
+
+    uint256 usdValue = (ethAmount * uint256(usdInEth)) / 1e18;
+    return usdValue;
+}
+
+function _calculateLoanAmount(uint256 ethAmount) internal view returns (uint256) {
+    uint256 usdInEth = getCollateralValueInUSD(ethAmount);
+    int256 usdInLink = getChainlinkDataFeedForLinkUSD();
+    require(usdInLink > 0, "Invalid LINK/USD price");
+
+    return (usdInEth * 1e18 * 75) / (uint256(usdInLink) * 100);
+}
+
 }
 
 
