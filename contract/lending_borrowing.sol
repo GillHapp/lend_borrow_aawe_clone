@@ -148,8 +148,9 @@ contract TokenTransferor is OwnerIsCreator {
     // Event emitted when the tokens are transferred to an account on another chain.
 
     struct UserPosition {
-    uint256 collateralETH;     // Amount of ETH user deposited
-    uint256 borrowedLINK;      // Amount of LINK borrowed  
+    uint256 collateralETH;
+    uint256 borrowedLINK; 
+    uint256 timestamp;
 }
     mapping(address => UserPosition) public userPositions;
 
@@ -207,63 +208,69 @@ contract TokenTransferor is OwnerIsCreator {
     }
 
     function borrowLinkAndCollETHAndPayLINK(
-        uint64 _destinationChainSelector
-    )
-        external
-        onlyAllowlistedChain(_destinationChainSelector)
-        validateReceiver(msg.sender)
-        payable 
-        returns (bytes32 messageId)
-    {
-        require(msg.value> 1 gwei,"Must send ETH as collateral");
+    uint64 _destinationChainSelector
+)
+    external
+    onlyAllowlistedChain(_destinationChainSelector)
+    validateReceiver(msg.sender)
+    payable 
+    returns (bytes32 messageId)
+{
+    require(msg.value > 1 gwei, "Must send ETH as collateral");
 
-       uint256 loanAmount = _calculateLoanAmount(msg.value);
+    uint256 loanAmount = _calculateLoanAmount(msg.value);
 
-       userPositions[msg.sender].collateralETH += msg.value;
-       userPositions[msg.sender].borrowedLINK += loanAmount;
+    // Load user's current position
+    UserPosition storage position = userPositions[msg.sender];
 
-        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-            msg.sender,
-             address(s_linkToken),
-            loanAmount,
-            address(s_linkToken)
-        );
-        // Get the fee required to send the message
-        uint256 fees = s_router.getFee(
-            _destinationChainSelector,
-            evm2AnyMessage
-        );
-        bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
-        require(success, "LINK fee transfer failed");
-        if (fees > s_linkToken.balanceOf(address(this)))
-            revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
+    // Update position data
+    position.collateralETH += msg.value;
+    position.borrowedLINK += loanAmount;
 
-        // approve the Router to transfer LINK tokens on contract's behalf. It will spend the fees in LINK
-        s_linkToken.approve(address(s_router), fees);
-
-        // approve the Router to spend tokens on contract's behalf. It will spend the amount of the given token
-        IERC20(s_linkToken).approve(address(s_router), loanAmount);
-
-        // Send the message through the router and store the returned message ID
-        messageId = s_router.ccipSend(
-            _destinationChainSelector,
-            evm2AnyMessage
-        );
-
-        // Emit an event with message details
-        emit TokensTransferred(
-            messageId,
-            _destinationChainSelector,
-            msg.sender,
-            address(s_linkToken),
-            loanAmount,
-            address(s_linkToken),
-            fees
-        );
-
-        // Return the message ID
-        return messageId;
+    // Only set timestamp if this is the first time they're borrowing
+    if (position.timestamp == 0) {
+        position.timestamp = block.timestamp;
     }
+
+    // Build CCIP message
+    Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
+        msg.sender,
+        address(s_linkToken),
+        loanAmount,
+        address(s_linkToken)
+    );
+
+    // Calculate CCIP fee
+    uint256 fees = s_router.getFee(_destinationChainSelector, evm2AnyMessage);
+
+    // Take LINK as fee from the user
+    bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
+    require(success, "LINK fee transfer failed");
+
+    if (fees > s_linkToken.balanceOf(address(this))) {
+        revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
+    }
+
+    // Approve router for fee and token transfer
+    s_linkToken.approve(address(s_router), fees);
+    IERC20(s_linkToken).approve(address(s_router), loanAmount);
+
+    // Send message via Chainlink CCIP
+    messageId = s_router.ccipSend(_destinationChainSelector, evm2AnyMessage);
+
+    emit TokensTransferred(
+        messageId,
+        _destinationChainSelector,
+        msg.sender,
+        address(s_linkToken),
+        loanAmount,
+        address(s_linkToken),
+        fees
+    );
+
+    return messageId;
+}
+
 
     function _buildCCIPMessage(
         address _receiver,
@@ -400,6 +407,30 @@ function liquidate(address user) external {
     // Emit liquidation event
     emit UserLiquidated(msg.sender, user, collateral, borrowedLINK);
 }
+
+function calculateInterestFee(address user) public view returns (
+    uint256 monthsPassed,
+    uint256 interestUSD,
+    uint256 collateralUSD
+) {
+    UserPosition memory position = userPositions[user];
+    require(position.collateralETH > 0, "No collateral");
+
+    // 1. Calculate time passed
+    uint256 secondsPassed = block.timestamp - position.timestamp;
+    monthsPassed = secondsPassed / 30 days;
+    if (monthsPassed == 0) monthsPassed = 1; // charge at least 1 month
+
+    // 2. Get collateral value in USD
+    collateralUSD = getCollateralValueInUSD(position.collateralETH);
+
+    // 3. Calculate interest: 1% per month
+    interestUSD = (collateralUSD * monthsPassed *2) / 100;
+
+    return (monthsPassed, interestUSD, collateralUSD);
+}
+
+
 
 
 
