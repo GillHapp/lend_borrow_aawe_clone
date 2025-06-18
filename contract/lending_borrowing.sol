@@ -163,6 +163,13 @@ contract TokenTransferor is OwnerIsCreator {
         uint256 fees // The fees paid for sending the message.
     );
 
+    event UserLiquidated(
+    address indexed liquidator,
+    address indexed user,
+    uint256 ethCollateralSeized,
+    uint256 linkRepaid
+);
+
     // Mapping to keep track of allowlisted destination chains.
     mapping(uint64 => bool) public allowlistedChains;
 
@@ -357,6 +364,44 @@ function _calculateLoanAmount(uint256 ethAmount) internal view returns (uint256)
 
     return (usdInEth * 1e18 * 75) / (uint256(usdInLink) * 100);
 }
+function liquidate(address user) external {
+    UserPosition storage position = userPositions[user];
+
+    require(position.collateralETH > 0, "No collateral found");
+    require(position.borrowedLINK > 0, "No borrowed amount");
+
+    // Step 1: Get ETH collateral value in USD
+    uint256 collateralUSD = getCollateralValueInUSD(position.collateralETH);
+
+    // Step 2: Get LINK price
+    int linkPrice = getChainlinkDataFeedForLinkUSD();
+    require(linkPrice > 0, "Invalid LINK/USD price");
+
+    // Step 3: Calculate debt in USD
+    uint256 borrowedLINK = position.borrowedLINK;
+    uint256 debtUSD = (borrowedLINK * uint256(linkPrice)) / 1e18;
+
+    // Step 4: Check if debt ≥ 80% of collateral
+    require(debtUSD * 100 >= collateralUSD * 80, "User is not eligible for liquidation");
+
+    // Step 5: Transfer LINK from liquidator to protocol
+    s_linkToken.safeTransferFrom(msg.sender, address(this), borrowedLINK);
+
+    // Step 6: Transfer collateral ETH to liquidator
+    uint256 collateral = position.collateralETH;
+
+    // Step 7: Delete the user's position
+    delete userPositions[user];
+
+    // Step 8: Send ETH to liquidator
+    (bool sent, ) = msg.sender.call{value: collateral}("");
+    require(sent, "Collateral transfer failed");
+
+    // Emit liquidation event
+    emit UserLiquidated(msg.sender, user, collateral, borrowedLINK);
+}
+
+
 
 }
 
