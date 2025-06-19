@@ -244,8 +244,8 @@ contract TokenTransferor is OwnerIsCreator {
     uint256 fees = s_router.getFee(_destinationChainSelector, evm2AnyMessage);
 
     // Take LINK as fee from the user
-    bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
-    require(success, "LINK fee transfer failed");
+    // bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
+    // require(success, "LINK fee transfer failed");
 
     if (fees > s_linkToken.balanceOf(address(this))) {
         revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
@@ -369,7 +369,7 @@ function _calculateLoanAmount(uint256 ethAmount) internal view returns (uint256)
     int256 usdInLink = getChainlinkDataFeedForLinkUSD();
     require(usdInLink > 0, "Invalid LINK/USD price");
 
-    return (usdInEth * 1e18 * 75) / (uint256(usdInLink) * 100);
+    return (usdInEth * 75 * 1e18) / (uint256(usdInLink) * 100);
 }
 function liquidate(address user) external {
     UserPosition storage position = userPositions[user];
@@ -430,8 +430,22 @@ function calculateInterestFee(address user) public view returns (
     return (monthsPassed, interestUSD, collateralUSD);
 }
 
+/// @notice Withdraws all ETH in the contract to the owner.
+function withdrawAllETHToOwner() external onlyOwner {
+    uint256 balance = address(this).balance;
+    if (balance == 0) revert NothingToWithdraw();
 
+    (bool success, ) = owner().call{value: balance}("");
+    if (!success) revert FailedToWithdrawEth(msg.sender, owner(), balance);
+}
 
+/// @notice Withdraws all LINK tokens in the contract to the owner.
+function withdrawAllLinkToOwner() external onlyOwner {
+    uint256 linkBalance = s_linkToken.balanceOf(address(this));
+    if (linkBalance == 0) revert NothingToWithdraw();
+
+    s_linkToken.safeTransfer(owner(), linkBalance);
+}
 
 
 }
