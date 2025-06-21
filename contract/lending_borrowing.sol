@@ -126,6 +126,24 @@
 // }
 
 
+// 0x5C2686Ed7d34cA688Ea267dA56C963Df6cF05288
+// 0x5C2686Ed7d34cA688Ea267dA56C963Df6cF05288
+
+// 0x3b41Fd71fe140E7b32A79F504ef70e7712b1935F
+
+
+// 0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59
+// 0x779877A7B0D9E8603169DdbD7836e478b4624789
+// 0x694AA1769357215DE4FAC081bf1f309aDC325306
+// 0xc59E3633BAAC79493d908e63626716e204A45EdF
+// 14767482510784806043
+
+
+
+
+// 0xe890e036b73Cf6D3101A8c63be4A496136A3fBDE
+
+
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
@@ -134,9 +152,10 @@ import {OwnerIsCreator} from "@chainlink/contracts/src/v0.8/shared/access/OwnerI
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
 import {IERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
+import {CCIPReceiver} from "@chainlink/contracts-ccip/contracts/applications/CCIPReceiver.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
-contract TokenTransferor is OwnerIsCreator {
+contract TokenTransferor is OwnerIsCreator,CCIPReceiver {
     using SafeERC20 for IERC20;
      AggregatorV3Interface internal dataFeedETHToUSD;// this is for eth usd
      AggregatorV3Interface internal dataFeedLinkToUSD;// this is for Link usd
@@ -146,7 +165,10 @@ contract TokenTransferor is OwnerIsCreator {
     error DestinationChainNotAllowlisted(uint64 destinationChainSelector); // Used when the destination chain has not been allowlisted by the contract owner.
     error InvalidReceiverAddress(); // Used when the receiver address is 0.
     // Event emitted when the tokens are transferred to an account on another chain.
-
+ // Custom errors to provide more descriptive revert messages.
+    error DestinationChainNotAllowed(uint64 destinationChainSelector); // Used when the destination chain has not been allowlisted by the contract owner.
+    error SourceChainNotAllowed(uint64 sourceChainSelector); // Used when the source chain has not been allowlisted by the contract owner.
+    error SenderNotAllowed(address sender); // Used when the sender has not been allowlisted by the contract owner.
     struct UserPosition {
     uint256 collateralETH;
     uint256 borrowedLINK; 
@@ -164,6 +186,21 @@ contract TokenTransferor is OwnerIsCreator {
         uint256 fees // The fees paid for sending the message.
     );
 
+     event MessageReceived(
+        bytes32 indexed messageId, // The unique ID of the CCIP message.
+        uint64 indexed sourceChainSelector, // The chain selector of the source chain.
+        address sender, // The address of the sender from the source chain.
+        string text, // The text that was received.
+        address token, // The token address that was transferred.
+        uint256 tokenAmount // The token amount that was transferred.
+    );
+
+    bytes32 private s_lastReceivedMessageId; // Store the last received messageId.
+    address private s_lastReceivedTokenAddress; // Store the last received token address.
+    uint256 private s_lastReceivedTokenAmount; // Store the last received amount.
+    string private s_lastReceivedText; // Store the last received text.
+
+
     event UserLiquidated(
     address indexed liquidator,
     address indexed user,
@@ -171,14 +208,47 @@ contract TokenTransferor is OwnerIsCreator {
     uint256 linkRepaid
 );
 
+  modifier onlyAllowlistedDestinationChain(uint64 _destinationChainSelector) {
+        if (!allowlistedDestinationChains[_destinationChainSelector])
+            revert DestinationChainNotAllowed(_destinationChainSelector);
+        _;
+    }
+
+    /// @dev Modifier that checks the receiver address is not 0.
+    /// @param _receiver The receiver address.
+    modifier validateReceiver(address _receiver) {
+        if (_receiver == address(0)) revert InvalidReceiverAddress();
+        _;
+    }
+
+    /// @dev Modifier that checks if the chain with the given sourceChainSelector is allowlisted and if the sender is allowlisted.
+    /// @param _sourceChainSelector The selector of the destination chain.
+    /// @param _sender The address of the sender.
+    modifier onlyAllowlisted(uint64 _sourceChainSelector, address _sender) {
+        if (!allowlistedSourceChains[_sourceChainSelector])
+            revert SourceChainNotAllowed(_sourceChainSelector);
+        if (!allowlistedSenders[_sender]) revert SenderNotAllowed(_sender);
+        _;
+    }
+
+
     // Mapping to keep track of allowlisted destination chains.
     mapping(uint64 => bool) public allowlistedChains;
+
+      // Mapping to keep track of allowlisted destination chains.
+    mapping(uint64 => bool) public allowlistedDestinationChains;
+
+    // Mapping to keep track of allowlisted source chains.
+    mapping(uint64 => bool) public allowlistedSourceChains;
+
+    // Mapping to keep track of allowlisted senders.
+    mapping(address => bool) public allowlistedSenders;
 
     IRouterClient private s_router;
 
     IERC20 private s_linkToken;
 
-    constructor(address _router, address _link, AggregatorV3Interface _priceFeedETHToUSD, AggregatorV3Interface _priceFeedLinkToUSD) {
+    constructor(address _router, address _link, AggregatorV3Interface _priceFeedETHToUSD, AggregatorV3Interface _priceFeedLinkToUSD) CCIPReceiver(_router) {
         s_router = IRouterClient(_router);
         s_linkToken = IERC20(_link);
          dataFeedETHToUSD = AggregatorV3Interface(
@@ -195,10 +265,8 @@ contract TokenTransferor is OwnerIsCreator {
         _;
     }
 
-    modifier validateReceiver(address _receiver) {
-        if (_receiver == address(0)) revert InvalidReceiverAddress();
-        _;
-    }
+
+
 
     function allowlistDestinationChain(
         uint64 _destinationChainSelector,
@@ -208,11 +276,14 @@ contract TokenTransferor is OwnerIsCreator {
     }
 
     function borrowLinkAndCollETHAndPayLINK(
-    uint64 _destinationChainSelector
+    uint64 _destinationChainSelector,
+     address _token
+    
 )
     external
     onlyAllowlistedChain(_destinationChainSelector)
     validateReceiver(msg.sender)
+
     payable 
     returns (bytes32 messageId)
 {
@@ -234,8 +305,8 @@ contract TokenTransferor is OwnerIsCreator {
 
     // Build CCIP message
     Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-        msg.sender,
-        address(s_linkToken),
+         msg.sender,
+         _token,
         loanAmount,
         address(s_linkToken)
     );
@@ -244,16 +315,16 @@ contract TokenTransferor is OwnerIsCreator {
     uint256 fees = s_router.getFee(_destinationChainSelector, evm2AnyMessage);
 
     // Take LINK as fee from the user
-    // bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
-    // require(success, "LINK fee transfer failed");
+    bool success = s_linkToken.transferFrom(msg.sender, address(this), fees);
+    require(success, "LINK fee transfer failed");
 
     if (fees > s_linkToken.balanceOf(address(this))) {
         revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
     }
 
-    // Approve router for fee and token transfer
     s_linkToken.approve(address(s_router), fees);
-    IERC20(s_linkToken).approve(address(s_router), loanAmount);
+    // Approve router for fee and token transfer
+    IERC20(_token).approve(address(s_router), loanAmount);
 
     // Send message via Chainlink CCIP
     messageId = s_router.ccipSend(_destinationChainSelector, evm2AnyMessage);
@@ -369,7 +440,8 @@ function _calculateLoanAmount(uint256 ethAmount) internal view returns (uint256)
     int256 usdInLink = getChainlinkDataFeedForLinkUSD();
     require(usdInLink > 0, "Invalid LINK/USD price");
 
-    return (usdInEth * 75 * 1e18) / (uint256(usdInLink) * 100);
+    uint256 loanAMount =  (usdInEth * 75 * 1e18) / (uint256(usdInLink) * 100);
+    return loanAMount;
 }
 function liquidate(address user) external {
     UserPosition storage position = userPositions[user];
@@ -445,6 +517,70 @@ function withdrawAllLinkToOwner() external onlyOwner {
     if (linkBalance == 0) revert NothingToWithdraw();
 
     s_linkToken.safeTransfer(owner(), linkBalance);
+}
+
+ function _ccipReceive(
+    Client.Any2EVMMessage memory any2EvmMessage
+)
+    internal
+    override
+    onlyAllowlisted(
+        any2EvmMessage.sourceChainSelector,
+        abi.decode(any2EvmMessage.sender, (address))
+    )
+{
+    // Decode the sender and data
+    address user = abi.decode(any2EvmMessage.sender, (address));
+    uint256 repaidAmount = any2EvmMessage.destTokenAmounts[0].amount;
+
+    // Validate token (must be LINK)
+    require(any2EvmMessage.destTokenAmounts[0].token == address(s_linkToken), "Invalid token");
+
+    UserPosition storage position = userPositions[user];
+    require(position.collateralETH > 0, "No collateral");
+    require(position.borrowedLINK > 0, "No borrowed debt");
+    require(repaidAmount >= position.borrowedLINK, "Repayment too small");
+
+    // Get interest fee in USD
+    (, uint256 interestUSD, ) = calculateInterestFee(user);
+    
+    // Convert interestUSD to ETH using Chainlink price feed
+    int ethUsd = getChainlinkDataFeedForETHUSD();
+    require(ethUsd > 0, "Invalid ETH/USD price");
+    uint256 interestInETH = (interestUSD * 1e18) / uint256(ethUsd);
+
+    // Cap interest to not exceed collateral
+    if (interestInETH > position.collateralETH) {
+        interestInETH = position.collateralETH;
+    }
+
+    uint256 refundETH = position.collateralETH - interestInETH;
+
+    // Clear user position
+    delete userPositions[user];
+
+    // Refund ETH to user
+    (bool sent, ) = user.call{value: refundETH}("");
+    require(sent, "Refund failed");
+
+    // Optionally: Keep interestInETH or send to owner
+    // (bool feeSent, ) = owner().call{value: interestInETH}();
+    // require(feeSent, "Fee transfer failed");
+
+    // Store internal state
+    s_lastReceivedMessageId = any2EvmMessage.messageId;
+    s_lastReceivedTokenAddress = any2EvmMessage.destTokenAmounts[0].token;
+    s_lastReceivedTokenAmount = any2EvmMessage.destTokenAmounts[0].amount;
+    s_lastReceivedText = "Loan repaid and ETH refunded with fee";
+
+    emit MessageReceived(
+        any2EvmMessage.messageId,
+        any2EvmMessage.sourceChainSelector,
+        user,
+        s_lastReceivedText,
+        s_lastReceivedTokenAddress,
+        s_lastReceivedTokenAmount
+    );
 }
 
 

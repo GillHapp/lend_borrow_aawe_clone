@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
+
+// 0xCaAEFE8032FBfcbb4a7f9f5F1e957F1B8c7f2392 contract address on sepolia 
+
+// 0x09da862f3368bc5f3487473c8e9f687819751cbb71b732bae885a5febd405849 harsh 
 pragma solidity 0.8.26;
-// 0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59
-// 0x779877A7B0D9E8603169DdbD7836e478b4624789
-// 0x694AA1769357215DE4FAC081bf1f309aDC325306
+
 import {IRouterClient} from "@chainlink/contracts-ccip/contracts/interfaces/IRouterClient.sol";
 import {OwnerIsCreator} from "@chainlink/contracts/src/v0.8/shared/access/OwnerIsCreator.sol";
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
@@ -10,7 +12,7 @@ import {CCIPReceiver} from "@chainlink/contracts-ccip/contracts/applications/CCI
 import {IERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-
+// 0xA19B25d0d03822C1b0daBD82D38B55d8f3A13003
 /// @title - A simple messenger contract for transferring/receiving tokens and data across chains.
 contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     using SafeERC20 for IERC20;
@@ -119,60 +121,6 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     function allowlistSender(address _sender, bool allowed) external onlyOwner {
         allowlistedSenders[_sender] = allowed;
     }
-
-    function sendMessagePayLINK(
-        uint64 _destinationChainSelector,
-        address _receiver,
-        address _token,
-        uint256 _amount
-    )
-        external
-        onlyAllowlistedDestinationChain(_destinationChainSelector)
-        validateReceiver(_receiver)
-        returns (bytes32 messageId)
-    {
-        // Create an EVM2AnyMessage struct in memory with necessary information for sending a cross-chain message
-        // address(linkToken) means fees are paid in LINK
-        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-            _receiver,
-            _token,
-            _amount,
-            address(s_linkToken)
-        );
-
-        // Initialize a router client instance to interact with cross-chain router
-        IRouterClient router = IRouterClient(this.getRouter());
-
-        // Get the fee required to send the CCIP message
-        uint256 fees = router.getFee(_destinationChainSelector, evm2AnyMessage);
-
-        if (fees > s_linkToken.balanceOf(address(this)))
-            revert NotEnoughBalance(s_linkToken.balanceOf(address(this)), fees);
-
-        // approve the Router to transfer LINK tokens on contract's behalf. It will spend the fees in LINK
-        s_linkToken.approve(address(router), fees);
-
-        // approve the Router to spend tokens on contract's behalf. It will spend the amount of the given token
-        IERC20(_token).approve(address(router), _amount);
-
-        // Send the message through the router and store the returned message ID
-        messageId = router.ccipSend(_destinationChainSelector, evm2AnyMessage);
-
-        // Emit an event with message details
-        emit MessageSent(
-            messageId,
-            _destinationChainSelector,
-            _receiver,
-            _token,
-            _amount,
-            address(s_linkToken),
-            fees
-        );
-
-        // Return the message ID
-        return messageId;
-    }
-
     function getLastReceivedMessageDetails()
         public
         view
@@ -206,7 +154,10 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     uint256 repaidAmount = any2EvmMessage.destTokenAmounts[0].amount;
 
     s_lastReceivedMessageId = any2EvmMessage.messageId;
-    s_lastReceivedText = abi.decode(any2EvmMessage.data, (string));
+    (address originalSender, string memory text) = abi.decode(
+            any2EvmMessage.data,
+            (address, string)
+        );
     s_lastReceivedTokenAddress = any2EvmMessage.destTokenAmounts[0].token;
     s_lastReceivedTokenAmount = repaidAmount;
 
@@ -214,13 +165,13 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
         any2EvmMessage.messageId,
         any2EvmMessage.sourceChainSelector,
         user,
-        abi.decode(any2EvmMessage.data, (string)),
+        text,
         s_lastReceivedTokenAddress,
         repaidAmount
     );
 
     // Fetch user's loan info
-    CollateralInfo storage info = userCollateral[user];
+    CollateralInfo storage info = userCollateral[originalSender];
     require(info.loanAmount > 0, "No active loan");
     require(repaidAmount >= info.loanAmount, "Not enough repaid");
 
@@ -252,11 +203,12 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
 
 
     function _buildCCIPMessage(
-        address _receiver,
+       address _receiver,
+        string calldata _text,
         address _token,
         uint256 _amount,
         address _feeTokenAddress
-    ) private pure returns (Client.EVM2AnyMessage memory) {
+    ) private view returns (Client.EVM2AnyMessage memory) {
         // Set the token amounts
         Client.EVMTokenAmount[]
             memory tokenAmounts = new Client.EVMTokenAmount[](1);
@@ -268,13 +220,13 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
         return
             Client.EVM2AnyMessage({
                 receiver: abi.encode(_receiver), // ABI-encoded receiver address
-                data: "", // ABI-encoded string
+                   data: abi.encode(msg.sender, _text), // ABI-encoded string
                 tokenAmounts: tokenAmounts, // The amount and type of token being transferred
                 extraArgs: Client._argsToBytes(
-                    Client.GenericExtraArgsV2({
-                        gasLimit: 0, // Gas limit for the callback on the destination chain
-                        allowOutOfOrderExecution: true // Allows the message to be executed out of order relative to other messages from the same sender
-                    })
+                   Client.GenericExtraArgsV2({
+                    gasLimit: 200_000,
+                    allowOutOfOrderExecution: true
+                })
                 ),
                 // Set the feeToken to a feeTokenAddress, indicating specific asset will be used for fees
                 feeToken: _feeTokenAddress
@@ -341,9 +293,11 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     return (ethUsdValue * 70) / 100;
 }
 function sendMessageWithCollateralInETH(
-    uint64 _destinationChainSelector,
-    address _token // the pegged $1 token
-)
+     uint64 _destinationChainSelector,
+     address _receiver,
+     string calldata _text,
+     address _token
+    )
     external
     payable
     onlyAllowlistedDestinationChain(_destinationChainSelector)
@@ -357,8 +311,9 @@ function sendMessageWithCollateralInETH(
 
     // Build CCIP message to send tokens cross-chain
     Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
-        msg.sender,
-        _token,
+       _receiver,
+            _text,
+            _token,
         loanTokenAmount,
         address(s_linkToken)
     );
@@ -396,6 +351,42 @@ function sendMessageWithCollateralInETH(
 
     return messageId;
 }
+
+
+    function liquidateBorrower(address borrower, address token) external {
+        CollateralInfo storage info = userCollateral[borrower];
+        require(info.loanAmount > 0, "No active loan to liquidate");
+
+        (, int256 price,,,) = dataFeedETHToUSD.latestRoundData();
+        require(price > 0, "Invalid ETH price");
+
+        uint256 ethUsdValue = (info.ethAmount * uint256(price)) / 1e8;
+        uint256 currentLTVbps = (info.loanAmount * 1e4) / ethUsdValue;
+        require(currentLTVbps >= 8000, "Borrower not undercollateralized");
+
+        // Liquidator must repay the borrower's loan in LINK
+        IERC20 repayToken = IERC20(token);
+        repayToken.safeTransferFrom(msg.sender, address(this), info.loanAmount);
+
+        // Calculate a 5% liquidation fee on the ETH collateral
+        uint256 liquidationFee = (info.ethAmount * 5) / 100;
+        uint256 collateralToLiquidator = info.ethAmount - liquidationFee;
+
+        // Transfer ETH collateral to liquidator
+        (bool success, ) = msg.sender.call{value: collateralToLiquidator}("");
+        require(success, "ETH transfer to liquidator failed");
+
+        // Emit a loan repaid event (optional reuse)
+        emit LoanRepaid(
+            borrower,
+            info.loanAmount,
+            0, // no interest paid since liquidator repaid principal only
+            collateralToLiquidator
+        );
+
+        delete userCollateral[borrower];
+    }
+
 
 
     function checkCollateralHealth(address user) external view returns (
