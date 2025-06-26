@@ -372,7 +372,7 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
         if (!sent) revert FailedToWithdrawEth(msg.sender, _beneficiary, amount);
     }
 
-   function claimReceivedTokens(address user) external onlyOwner {
+   function claimReceivedTokens(address user) external {
     UserTokenReceipt storage receipt = s_userReceipts[user];
 
     if (receipt.amount == 0) revert NothingToWithdraw();
